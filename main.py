@@ -26,6 +26,7 @@ import logging
 import asyncio
 import time
 import threading
+from datetime import datetime, timezone
 from threading import Thread
 
 from flask import Flask
@@ -61,6 +62,8 @@ CHAOS_TRIGGER_CHANCE = float(os.environ.get("CHAOS_TRIGGER_CHANCE", "0.45"))
 MAX_RECENT_MESSAGES = 30
 MAX_USER_CONTEXT_MESSAGES = int(os.environ.get("MAX_USER_CONTEXT_MESSAGES", "3"))
 AI_COOLDOWN_SECONDS = float(os.environ.get("AI_COOLDOWN_SECONDS", "2.2"))
+DAILY_USER_TOKEN_LIMIT = int(os.environ.get("DAILY_USER_TOKEN_LIMIT", "5000"))
+TITLE_OF_DAY_HOUR_UTC = int(os.environ.get("TITLE_OF_DAY_HOUR_UTC", "12"))
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в Environment Variables")
@@ -80,6 +83,9 @@ BOT_STATS = {
     "prompt_tokens": 0,
     "completion_tokens": 0,
     "total_tokens": 0,
+    "blocked_unactivated": 0,
+    "daily_limit_hits": 0,
+    "title_of_day_sent": 0,
     "last_update_ts": 0,
     "last_ai_ts": 0,
 }
@@ -90,6 +96,15 @@ CHAOS_ENABLED_CHATS: set[int] = set()
 seen_users: dict[int, dict[int, str]] = {}
 recent_messages: dict[int, list[tuple[str, str]]] = {}
 user_context: dict[tuple[int, int], list[dict[str, str]]] = {}
+
+# Пользователи, которые написали /start в личке.
+activated_users: set[int] = set()
+
+# Дневной расход токенов по людям: {user_id: {"date": "YYYY-MM-DD", "tokens": int}}
+user_daily_tokens: dict[int, dict[str, int | str]] = {}
+
+# Титул дня по чатам: {chat_id: "YYYY-MM-DD"}
+title_of_day_state: dict[int, str] = {}
 
 web = Flask(__name__)
 
@@ -164,7 +179,11 @@ def can_make_ai_request() -> bool:
         LAST_AI_REQUEST = now
         return True
 
-def ask_ai(user_text: str, chat_id: int | None = None, user_id: int | None = None, username: str = "кто-то") -> str:
+def ask_ai(user_text: str, chat_id: int | None = None, user_id: int | None = None, username: str = "кто-то", ignore_user_limit: bool = False) -> str:
+    if user_id is not None and not ignore_user_limit and not has_daily_tokens_left(user_id):
+        BOT_STATS["daily_limit_hits"] += 1
+        return limit_text()
+
     if not can_make_ai_request():
         return random.choice([
             "погоди, у меня мозг остывает, железный кабачок",
@@ -194,7 +213,10 @@ def ask_ai(user_text: str, chat_id: int | None = None, user_id: int | None = Non
         if usage:
             BOT_STATS["prompt_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
             BOT_STATS["completion_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
-            BOT_STATS["total_tokens"] += int(getattr(usage, "total_tokens", 0) or 0)
+            total_used = int(getattr(usage, "total_tokens", 0) or 0)
+            BOT_STATS["total_tokens"] += total_used
+            if user_id is not None and not ignore_user_limit:
+                add_user_daily_tokens(user_id, total_used)
         answer = completion.choices[0].message.content.strip() or "я чёта сломалась, пиздец"
         if chat_id is not None and user_id is not None:
             history = get_user_history(chat_id, user_id)
@@ -308,7 +330,10 @@ def admin_text() -> str:
         f"AI-запросов: <code>{BOT_STATS['ai_requests']}</code>\n"
         f"AI cooldown skips: <code>{BOT_STATS['ai_skipped_cooldown']}</code>\n"
         f"Действий хаоса: <code>{BOT_STATS['chaos_actions']}</code>\n"
-        f"Ошибок: <code>{BOT_STATS['errors']}</code>\n\n"
+        f"Ошибок: <code>{BOT_STATS['errors']}</code>\n"
+        f"Неактивированных стопнуло: <code>{BOT_STATS['blocked_unactivated']}</code>\n"
+        f"Уперлись в дневной лимит: <code>{BOT_STATS['daily_limit_hits']}</code>\n"
+        f"Титулов дня выдано: <code>{BOT_STATS['title_of_day_sent']}</code>\n\n"
         f"Prompt tokens: <code>{BOT_STATS['prompt_tokens']}</code>\n"
         f"Completion tokens: <code>{BOT_STATS['completion_tokens']}</code>\n"
         f"Total tokens: <code>{BOT_STATS['total_tokens']}</code>\n\n"
@@ -356,7 +381,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_owner(update):
         await msg.reply_text(admin_text(), parse_mode="HTML")
         return
-    start_text = ask_ai("Юзер написал /start. Ответь коротко, скажи что ты живая и будешь творить дичь.", chat_id=chat_id, user_id=user_id, username=username)
+    start_text = ask_ai("Юзер написал /start в личке. Скажи коротко, что активация готова и теперь можно писать тебе в чатах.", chat_id=chat_id, user_id=user_id, username=username)
     await msg.reply_text(start_text)
 
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -419,6 +444,8 @@ async def on_bot_added_to_chat(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def chaos_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
+
+    await maybe_send_title_of_day(context, chat_id)
     if chat_id not in CHAOS_ENABLED_CHATS: return
     if random.random() > CHAOS_TRIGGER_CHANCE: return
     action = random.choice(["tag", "copy", "message", "poll", "location"])
