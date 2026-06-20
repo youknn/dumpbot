@@ -52,14 +52,14 @@ PORT = int(os.environ.get("PORT", "10000"))
 OWNER_ID = int(os.environ.get("OWNER_ID", "0") or "0")
 
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "180"))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "100"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "1.0"))
 
 RANDOM_REPLY_CHANCE = float(os.environ.get("RANDOM_REPLY_CHANCE", "0.10"))
 CHAOS_INTERVAL_SECONDS = int(os.environ.get("CHAOS_INTERVAL_SECONDS", "240"))
 CHAOS_TRIGGER_CHANCE = float(os.environ.get("CHAOS_TRIGGER_CHANCE", "0.45"))
 MAX_RECENT_MESSAGES = 30
-MAX_USER_CONTEXT_MESSAGES = int(os.environ.get("MAX_USER_CONTEXT_MESSAGES", "6"))
+MAX_USER_CONTEXT_MESSAGES = int(os.environ.get("MAX_USER_CONTEXT_MESSAGES", "3"))
 AI_COOLDOWN_SECONDS = float(os.environ.get("AI_COOLDOWN_SECONDS", "2.2"))
 
 if not BOT_TOKEN:
@@ -136,15 +136,15 @@ def remember_message(chat_id: int, user, text: str) -> None:
     if len(bucket) > MAX_RECENT_MESSAGES:
         bucket.pop(0)
 
-def build_recent_chat_context(chat_id: int, limit: int = 6) -> str:
+def build_recent_chat_context(chat_id: int, limit: int = 3) -> str:
     history = recent_messages.get(chat_id, [])[-limit:]
     if not history:
         return "Недавних сообщений в чате нет."
     lines = []
     for author, text in history:
         clean = str(text).replace("\n", " ").strip()
-        if len(clean) > 160:
-            clean = clean[:160] + "..."
+        if len(clean) > 80:
+            clean = clean[:80] + "..."
         lines.append(f"{author}: {clean}")
     return "\n".join(lines)
 
