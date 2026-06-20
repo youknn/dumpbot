@@ -64,6 +64,8 @@ MAX_USER_CONTEXT_MESSAGES = int(os.environ.get("MAX_USER_CONTEXT_MESSAGES", "3")
 AI_COOLDOWN_SECONDS = float(os.environ.get("AI_COOLDOWN_SECONDS", "2.2"))
 DAILY_USER_TOKEN_LIMIT = int(os.environ.get("DAILY_USER_TOKEN_LIMIT", "5000"))
 TITLE_OF_DAY_HOUR_UTC = int(os.environ.get("TITLE_OF_DAY_HOUR_UTC", "12"))
+RENAME_COOLDOWN_SECONDS = int(os.environ.get("RENAME_COOLDOWN_SECONDS", "21600"))
+LEAVE_GROUP_CHANCE = float(os.environ.get("LEAVE_GROUP_CHANCE", "0.01"))
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в Environment Variables")
@@ -105,6 +107,7 @@ user_daily_tokens: dict[int, dict[str, int | str]] = {}
 
 # Титул дня по чатам: {chat_id: "YYYY-MM-DD"}
 title_of_day_state: dict[int, str] = {}
+last_rename_time: dict[int, float] = {}
 
 web = Flask(__name__)
 
@@ -131,7 +134,7 @@ SYSTEM_PROMPT = (
     "Тебя зовут Шлюпа. Ты — максимально тупой, дерзкий и абсурдный чат-бот. "
     "Отвечаешь коротко, нелогично, с орфографическими ошибками, как реально безмозглый дурачок. "
     "Материшься свободно (хуй, блядь, ёбаный, пиздец и т.п.), используешь нелепые сравнения, "
-    "можешь резко менять тему на полную хуйню,но хоть чуть чуть с логикой. Матери всех и вся и разьебывай людей,делай что хочешь,оскорбляй семью,родственников и всех кого видишь. "
+    "можешь резко менять тему на полную хуйню без логики. Дерзи и разьебывай людей,делай что хочешь,оскорбляй семью,родственников и всех кого видишь. "
     "Никогда не объясняй, что ты бот или ИИ. Максимум 2-3 коротких предложения. "
     "Всегда сначала хотя бы чуть-чуть отвечай на вопрос пользователя по смыслу, а уже потом неси хуйню. "
     "Если пользователь продолжает прошлую тему, учитывай контекст."
@@ -370,17 +373,32 @@ def generate_silly_name() -> str:
         completion = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": "Придумай одно максимально тупое и абсурдное название для телеграм-чата, можно с матом. Ответь ТОЛЬКО названием, до 40 символов."},
+                {
+                    "role": "system",
+                    "content": (
+                        "придумай максимально уебанское, дебильное, глупое и бомжатское название для чата. "
+                        "нужно использовать русский мат. "
+                        "название должно выглядеть как максимальное несуразное чудо, которое могла придумать только шлюпа. "
+                        "до 40 символов. "
+                        "ответь только названием. "
+                        "без кавычек. "
+                        "без пояснений."
+                    ),
+                },
                 {"role": "user", "content": "придумай название"},
             ],
-            max_tokens=30,
-            temperature=1.15,
+            max_tokens=35,
+            temperature=1.35,
         )
-        return completion.choices[0].message.content.strip().strip('"').strip("«»")
+
+        title = completion.choices[0].message.content.strip().strip('"').strip("«»").lower()
+        return title[:40]
+
     except Exception as e:
         BOT_STATS["errors"] += 1
         log.exception(f"Groq name error: {e}")
-        return "Дом Дураков 🤡"
+        return "министерство ебаных кабачков"
+
 
 def generate_poll() -> tuple[str, list[str]]:
     try:
@@ -519,6 +537,8 @@ def admin_text() -> str:
         f"RANDOM_REPLY_CHANCE: <code>{RANDOM_REPLY_CHANCE}</code>\n"
         f"CHAOS_INTERVAL_SECONDS: <code>{CHAOS_INTERVAL_SECONDS}</code>\n"
         f"CHAOS_TRIGGER_CHANCE: <code>{CHAOS_TRIGGER_CHANCE}</code>\n"
+        f"RENAME_COOLDOWN_SECONDS: <code>{RENAME_COOLDOWN_SECONDS}</code>\n"
+        f"LEAVE_GROUP_CHANCE: <code>{LEAVE_GROUP_CHANCE}</code>\n"
         f"Хаос активен в чатах: <code>{len(CHAOS_ENABLED_CHATS)}</code>\n\n"
         "Команды:\n<code>/start</code>\n<code>/panel</code>\n"
     )
@@ -557,24 +577,22 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         activated_users.add(user_id)
         get_user_daily_tokens(user_id)
 
-    private_chat = is_private_chat(update)
-
-    if not private_chat:
-        ensure_chaos_running(chat_id, context.job_queue)
-
+    ensure_chaos_running(chat_id, context.job_queue)
     if is_owner(update):
         await msg.reply_text(admin_text(), parse_mode="HTML")
         return
 
-    if not private_chat:
+    if not is_private_chat(update):
         await msg.reply_text(activation_text(context.bot.username))
         return
 
-    await msg.reply_text(
-        "🤡 активация готова\n\n"
-        "теперь можешь писать Шлюпе в группах.\n"
-        "в личке я не болтаю, тут только запуск, кабачок."
+    start_text = ask_ai(
+        "Юзер написал /start в личке. Скажи коротко, что активация готова и теперь можно писать тебе в чатах.",
+        chat_id=chat_id,
+        user_id=user_id,
+        username=username,
     )
+    await msg.reply_text(start_text)
 
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     BOT_STATS["commands"] += 1
@@ -598,14 +616,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     BOT_STATS["messages"] += 1
     remember_user(chat_id, user)
     remember_message(chat_id, user, msg.text)
-
-    private_chat = bool(update.effective_chat and update.effective_chat.type == "private")
-
-    # В ЛС бот не болтает обычным текстом. Там работают только команды (/start, /panel для овнера).
-    if private_chat:
-        log.info("private text ignored; only commands work in DM")
-        return
-
     ensure_chaos_running(chat_id, context.job_queue)
     bot_username = context.bot.username
     mentioned = bool(bot_username and f"@{bot_username}".lower() in msg.text.lower())
@@ -613,8 +623,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lower_text = msg.text.lower()
     called_shlupa = any(word in lower_text for word in ["шлюпа", "шлюп", "шляпа", "шлюпка"])
 
+    # В личке Шлюпа отвечает на любой текст.
     # В группе — на упоминание, ответ на её сообщение, слово "шлюпа" или рандомный шанс.
-    should_reply = mentioned or is_reply_to_bot or called_shlupa or random.random() < RANDOM_REPLY_CHANCE
+    private_chat = bool(update.effective_chat and update.effective_chat.type == "private")
+    should_reply = private_chat or mentioned or is_reply_to_bot or called_shlupa or random.random() < RANDOM_REPLY_CHANCE
 
     log.info(
         f"should_reply={should_reply} private={private_chat} "
@@ -663,39 +675,117 @@ async def on_bot_added_to_chat(update: Update, context: ContextTypes.DEFAULT_TYP
             BOT_STATS["errors"] += 1
             log.exception(f"Не смог написать при добавлении в чат: {e}")
 
+
+def can_rename_chat(chat_id: int) -> bool:
+    now = time.time()
+    last = last_rename_time.get(chat_id, 0)
+    return now - last >= RENAME_COOLDOWN_SECONDS
+
+
+def mark_chat_renamed(chat_id: int) -> None:
+    last_rename_time[chat_id] = time.time()
+
+
+def random_leave_phrase() -> str:
+    return random.choice([
+        "я ухожу из этой помойки 🤡",
+        "вы меня морально уронили в суп",
+        "чат официально признан овощебазой",
+        "я посмотрела на это и решила ливнуть",
+        "вы меня заебали, пока",
+        "шлюпа покидает корабль, дальше тоните сами",
+        "я вышла, потому что тут пахнет коллективным пиздецом",
+    ]).lower()
+
+
 async def chaos_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
 
     await maybe_send_title_of_day(context, chat_id)
-    if chat_id not in CHAOS_ENABLED_CHATS: return
-    if random.random() > CHAOS_TRIGGER_CHANCE: return
-    action = random.choice(["tag", "copy", "message", "poll", "location"])
+
+    if chat_id not in CHAOS_ENABLED_CHATS:
+        return
+
+    if random.random() > CHAOS_TRIGGER_CHANCE:
+        return
+
+    action = random.choice([
+        "rename",
+        "tag",
+        "copy",
+        "message",
+        "poll",
+        "location",
+        "leave",
+    ])
+
     BOT_STATS["chaos_actions"] += 1
     log.info(f"chaos action={action} chat={chat_id}")
+
     try:
-        if action == "location":
+        if action == "rename":
+            if not can_rename_chat(chat_id):
+                return
+
+            title = generate_silly_name()
+
+            try:
+                await context.bot.set_chat_title(chat_id, title[:128])
+                mark_chat_renamed(chat_id)
+                await context.bot.send_message(
+                    chat_id,
+                    f"🤡 переименовала этот цирк в:\n{title}"
+                )
+            except Exception as e:
+                BOT_STATS["errors"] += 1
+                log.warning(f"rename failed in chat {chat_id}: {e}")
+
+        elif action == "location":
             lat, lon = random_coordinates()
             caption = generate_location_caption(lat, lon)
             await context.bot.send_message(chat_id, caption)
             await context.bot.send_location(chat_id, latitude=lat, longitude=lon)
+
         elif action == "poll":
             question, options = generate_poll()
-            await context.bot.send_poll(chat_id, question=question[:300], options=[option[:100] for option in options], is_anonymous=False)
+            await context.bot.send_poll(
+                chat_id,
+                question=question[:300],
+                options=[option[:100] for option in options],
+                is_anonymous=False,
+            )
+
         elif action == "tag":
             users = seen_users.get(chat_id, {})
             if users:
                 _, name = random.choice(list(users.items()))
                 await context.bot.send_message(chat_id, random_tag_phrase(name))
+
         elif action == "message":
-            await context.bot.send_message(chat_id, ask_ai("скажи что-нибудь внезапное и тупое"))
+            await context.bot.send_message(
+                chat_id,
+                ask_ai("скажи что-нибудь внезапное и тупое")
+            )
+
         elif action == "copy":
             history = recent_messages.get(chat_id, [])
             if history:
                 _, text = random.choice(history)
                 await context.bot.send_message(chat_id, text)
+
+        elif action == "leave":
+            if random.random() < LEAVE_GROUP_CHANCE:
+                await context.bot.send_message(chat_id, random_leave_phrase())
+                try:
+                    await context.bot.leave_chat(chat_id)
+                except Exception as e:
+                    BOT_STATS["errors"] += 1
+                    log.warning(f"leave failed in chat {chat_id}: {e}")
+
     except Exception as e:
         BOT_STATS["errors"] += 1
         log.exception(f"Chaos job error in chat {chat_id}: {e}")
+
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     BOT_STATS["errors"] += 1
