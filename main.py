@@ -179,6 +179,139 @@ def can_make_ai_request() -> bool:
         LAST_AI_REQUEST = now
         return True
 
+
+# ---------- АКТИВАЦИЯ / ЛИМИТЫ / ТИТУЛ ДНЯ ----------
+
+def today_key() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def is_private_chat(update: Update) -> bool:
+    return bool(update.effective_chat and update.effective_chat.type == "private")
+
+
+def is_user_activated(user_id: int) -> bool:
+    if user_id == OWNER_ID:
+        return True
+    return user_id in activated_users
+
+
+def get_user_daily_tokens(user_id: int) -> int:
+    day = today_key()
+    data = user_daily_tokens.get(user_id)
+
+    if not data or data.get("date") != day:
+        user_daily_tokens[user_id] = {"date": day, "tokens": 0}
+        return 0
+
+    return int(data.get("tokens", 0) or 0)
+
+
+def add_user_daily_tokens(user_id: int, tokens: int) -> None:
+    if user_id == OWNER_ID:
+        return
+
+    day = today_key()
+    current = get_user_daily_tokens(user_id)
+    user_daily_tokens[user_id] = {
+        "date": day,
+        "tokens": current + int(tokens or 0),
+    }
+
+
+def has_daily_tokens_left(user_id: int) -> bool:
+    if user_id == OWNER_ID:
+        return True
+    return get_user_daily_tokens(user_id) < DAILY_USER_TOKEN_LIMIT
+
+
+def activation_text(bot_username: str | None = None) -> str:
+    if bot_username:
+        return (
+            "🤡 э, ты ещё не активировал Шлюпу\n\n"
+            f"напиши мне в личку: @{bot_username}\n"
+            "и жмакни /start\n\n"
+            "потом вернёшься сюда, кабачок недонастроенный"
+        )
+    return (
+        "🤡 э, ты ещё не активировал Шлюпу\n\n"
+        "напиши мне в личку /start\n"
+        "потом возвращайся сюда, кабачок"
+    )
+
+
+def limit_text() -> str:
+    return (
+        "🤡 дневной лимит токенов сожран\n\n"
+        "на сегодня всё, приходи завтра\n"
+        "я не резиновая, кожаный пылесос"
+    )
+
+
+async def notify_limit_private(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    try:
+        await context.bot.send_message(chat_id=user_id, text=limit_text())
+    except Exception as e:
+        log.warning(f"Не смог отправить лимит в ЛС user={user_id}: {e}")
+
+
+def make_title_of_day(users: dict[int, str]) -> str | None:
+    if not users:
+        return None
+
+    _, name = random.choice(list(users.items()))
+    titles = [
+        "главный кабачок дня",
+        "министр арбузной промышленности",
+        "почётный мыслитель табуретки",
+        "рыцарь кривого вайба",
+        "генерал диванных войск",
+        "официальный хранитель пельменя",
+        "магистр подозрительного чая",
+        "главный овощ конференции",
+        "президент случайной хуйни",
+        "князь мокрого асфальта",
+    ]
+    reasons = [
+        "слишком уверенно молчал",
+        "выглядел как человек, который спорит с микроволновкой",
+        "по энергетике сегодня победил холодильник",
+        "чат сам так решил, я просто ору",
+        "подозрительно долго существовал",
+        "его аура пахнет системным блоком",
+        "так совпали звёзды и мой сломанный процессор",
+        "иначе вселенная бы не загрузилась",
+    ]
+    return (
+        "🏆 ТИТУЛ ДНЯ\n\n"
+        f"Сегодня <b>{random.choice(titles)}</b>:\n"
+        f"@{name}\n\n"
+        f"Причина: {random.choice(reasons)} 🤡"
+    )
+
+
+async def maybe_send_title_of_day(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    day = today_key()
+    if title_of_day_state.get(chat_id) == day:
+        return
+
+    now = datetime.now(timezone.utc)
+    if now.hour < TITLE_OF_DAY_HOUR_UTC:
+        return
+
+    title = make_title_of_day(seen_users.get(chat_id, {}))
+    if not title:
+        return
+
+    try:
+        await context.bot.send_message(chat_id, title, parse_mode="HTML")
+        title_of_day_state[chat_id] = day
+        BOT_STATS["title_of_day_sent"] += 1
+    except Exception as e:
+        BOT_STATS["errors"] += 1
+        log.exception(f"Title of day error in chat {chat_id}: {e}")
+
+
 def ask_ai(user_text: str, chat_id: int | None = None, user_id: int | None = None, username: str = "кто-то", ignore_user_limit: bool = False) -> str:
     if user_id is not None and not ignore_user_limit and not has_daily_tokens_left(user_id):
         BOT_STATS["daily_limit_hits"] += 1
@@ -377,11 +510,26 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = user.username or user.first_name or "кто-то" if user else "кто-то"
     remember_user(chat_id, user)
     remember_message(chat_id, user, "/start")
+
+    if is_private_chat(update) and user_id:
+        activated_users.add(user_id)
+        get_user_daily_tokens(user_id)
+
     ensure_chaos_running(chat_id, context.job_queue)
     if is_owner(update):
         await msg.reply_text(admin_text(), parse_mode="HTML")
         return
-    start_text = ask_ai("Юзер написал /start в личке. Скажи коротко, что активация готова и теперь можно писать тебе в чатах.", chat_id=chat_id, user_id=user_id, username=username)
+
+    if not is_private_chat(update):
+        await msg.reply_text(activation_text(context.bot.username))
+        return
+
+    start_text = ask_ai(
+        "Юзер написал /start в личке. Скажи коротко, что активация готова и теперь можно писать тебе в чатах.",
+        chat_id=chat_id,
+        user_id=user_id,
+        username=username,
+    )
     await msg.reply_text(start_text)
 
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -419,13 +567,43 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_reply_to_bot = bool(msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == context.bot.id)
     lower_text = msg.text.lower()
     called_shlupa = any(word in lower_text for word in ["шлюпа", "шлюп", "шляпа", "шлюпка"])
-    should_reply = mentioned or is_reply_to_bot or called_shlupa or random.random() < RANDOM_REPLY_CHANCE
-    log.info(f"should_reply={should_reply} mentioned={mentioned} reply={is_reply_to_bot} called={called_shlupa}")
-    if not should_reply: return
+
+    # В личке Шлюпа отвечает на любой текст.
+    # В группе — на упоминание, ответ на её сообщение, слово "шлюпа" или рандомный шанс.
+    private_chat = bool(update.effective_chat and update.effective_chat.type == "private")
+    should_reply = private_chat or mentioned or is_reply_to_bot or called_shlupa or random.random() < RANDOM_REPLY_CHANCE
+
+    log.info(
+        f"should_reply={should_reply} private={private_chat} "
+        f"mentioned={mentioned} reply={is_reply_to_bot} called={called_shlupa}"
+    )
+
+    if not should_reply:
+        return
+
+    # Если юзер не активировал бота в ЛС — не тратим Groq, а даём готовый текст.
+    if not is_user_activated(user_id):
+        BOT_STATS["blocked_unactivated"] += 1
+        await msg.reply_text(activation_text(bot_username))
+        return
+
+    # Если дневной лимит юзера сожран — тоже не тратим Groq.
+    if not has_daily_tokens_left(user_id):
+        BOT_STATS["daily_limit_hits"] += 1
+        await msg.reply_text(limit_text())
+        await notify_limit_private(context, user_id)
+        return
+
     text = msg.text
     if bot_username:
         text = text.replace(f"@{bot_username}", "").replace(f"@{bot_username.lower()}", "")
-    reply = ask_ai(text.strip() or "скажи что-нибудь тупое", chat_id=chat_id, user_id=user_id, username=username)
+
+    reply = ask_ai(
+        text.strip() or "скажи что-нибудь тупое",
+        chat_id=chat_id,
+        user_id=user_id,
+        username=username,
+    )
     await msg.reply_text(reply)
 
 async def on_bot_added_to_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
