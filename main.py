@@ -557,22 +557,24 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         activated_users.add(user_id)
         get_user_daily_tokens(user_id)
 
-    ensure_chaos_running(chat_id, context.job_queue)
+    private_chat = is_private_chat(update)
+
+    if not private_chat:
+        ensure_chaos_running(chat_id, context.job_queue)
+
     if is_owner(update):
         await msg.reply_text(admin_text(), parse_mode="HTML")
         return
 
-    if not is_private_chat(update):
+    if not private_chat:
         await msg.reply_text(activation_text(context.bot.username))
         return
 
-    start_text = ask_ai(
-        "Юзер написал /start в личке. Скажи коротко, что активация готова и теперь можно писать тебе в чатах.",
-        chat_id=chat_id,
-        user_id=user_id,
-        username=username,
+    await msg.reply_text(
+        "🤡 активация готова\n\n"
+        "теперь можешь писать Шлюпе в группах.\n"
+        "в личке я не болтаю, тут только запуск, кабачок."
     )
-    await msg.reply_text(start_text)
 
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     BOT_STATS["commands"] += 1
@@ -596,6 +598,14 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     BOT_STATS["messages"] += 1
     remember_user(chat_id, user)
     remember_message(chat_id, user, msg.text)
+
+    private_chat = bool(update.effective_chat and update.effective_chat.type == "private")
+
+    # В ЛС бот не болтает обычным текстом. Там работают только команды (/start, /panel для овнера).
+    if private_chat:
+        log.info("private text ignored; only commands work in DM")
+        return
+
     ensure_chaos_running(chat_id, context.job_queue)
     bot_username = context.bot.username
     mentioned = bool(bot_username and f"@{bot_username}".lower() in msg.text.lower())
@@ -603,10 +613,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lower_text = msg.text.lower()
     called_shlupa = any(word in lower_text for word in ["шлюпа", "шлюп", "шляпа", "шлюпка"])
 
-    # В личке Шлюпа отвечает на любой текст.
     # В группе — на упоминание, ответ на её сообщение, слово "шлюпа" или рандомный шанс.
-    private_chat = bool(update.effective_chat and update.effective_chat.type == "private")
-    should_reply = private_chat or mentioned or is_reply_to_bot or called_shlupa or random.random() < RANDOM_REPLY_CHANCE
+    should_reply = mentioned or is_reply_to_bot or called_shlupa or random.random() < RANDOM_REPLY_CHANCE
 
     log.info(
         f"should_reply={should_reply} private={private_chat} "
