@@ -104,8 +104,15 @@ CHAOS_INTERVAL_SECONDS = int(os.environ.get("CHAOS_INTERVAL_SECONDS", "60"))
 CHAOS_TRIGGER_CHANCE = float(os.environ.get("CHAOS_TRIGGER_CHANCE", "0.95"))
 MAX_RECENT_MESSAGES = 30
 
+# Сколько пар user/assistant хранить для каждого человека.
+MAX_USER_CONTEXT_MESSAGES = int(os.environ.get("MAX_USER_CONTEXT_MESSAGES", "12"))
+
 seen_users: dict[int, dict[int, str]] = {}
 recent_messages: dict[int, list[tuple[str, str]]] = {}
+
+# Контекст отдельно для каждого человека в каждом чате:
+# {(chat_id, user_id): [{"role": "user"/"assistant", "content": "..."}]}
+user_context: dict[tuple[int, int], list[dict[str, str]]] = {}
 
 
 # ---------- ПАМЯТЬ ЧАТА ----------
@@ -128,6 +135,30 @@ def remember_message(chat_id: int, user, text: str) -> None:
         bucket.pop(0)
 
 
+def build_recent_chat_context(chat_id: int, limit: int = 8) -> str:
+    """Короткий общий контекст чата, чтобы бот понимал, о чём примерно базар."""
+    history = recent_messages.get(chat_id, [])[-limit:]
+    if not history:
+        return "Недавних сообщений в чате нет."
+
+    lines = []
+    for author, text in history:
+        clean = str(text).replace("\n", " ").strip()
+        if len(clean) > 180:
+            clean = clean[:180] + "..."
+        lines.append(f"{author}: {clean}")
+
+    return "\n".join(lines)
+
+
+def get_user_history(chat_id: int, user_id: int) -> list[dict[str, str]]:
+    return user_context.setdefault((chat_id, user_id), [])
+
+
+def save_user_history(chat_id: int, user_id: int, history: list[dict[str, str]]) -> None:
+    user_context[(chat_id, user_id)] = history[-MAX_USER_CONTEXT_MESSAGES:]
+
+
 # ---------- ГЕНЕРАЦИЯ ----------
 
 def random_coordinates() -> tuple[float, float]:
@@ -136,19 +167,55 @@ def random_coordinates() -> tuple[float, float]:
     return lat, lon
 
 
-def ask_ai(user_text: str) -> str:
+def ask_ai(user_text: str, chat_id: int | None = None, user_id: int | None = None, username: str = "кто-то") -> str:
+    """
+    Генерация с контекстом конкретного человека.
+    Если chat_id/user_id не переданы — работает по-старому без памяти.
+    """
     BOT_STATS["ai_requests"] += 1
+
     try:
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        if chat_id is not None and user_id is not None:
+            personal_history = get_user_history(chat_id, user_id)
+
+            chat_context = build_recent_chat_context(chat_id)
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Вот недавний контекст чата. Используй его, чтобы хотя бы чуть-чуть понимать, "
+                    "о чём речь, но отвечай в своём тупом стиле.\n\n"
+                    f"{chat_context}"
+                )
+            })
+
+            messages.extend(personal_history[-MAX_USER_CONTEXT_MESSAGES:])
+
+            messages.append({
+                "role": "user",
+                "content": f"{username}: {user_text}"
+            })
+        else:
+            messages.append({"role": "user", "content": user_text})
+
         completion = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_text},
-            ],
-            max_tokens=150,
-            temperature=1.1,
+            model=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant"),
+            messages=messages,
+            max_tokens=int(os.environ.get("MAX_TOKENS", "180")),
+            temperature=float(os.environ.get("TEMPERATURE", "1.25")),
         )
-        return completion.choices[0].message.content.strip()
+
+        answer = completion.choices[0].message.content.strip()
+
+        if chat_id is not None and user_id is not None:
+            history = get_user_history(chat_id, user_id)
+            history.append({"role": "user", "content": user_text})
+            history.append({"role": "assistant", "content": answer})
+            save_user_history(chat_id, user_id, history)
+
+        return answer
+
     except Exception as e:
         BOT_STATS["errors"] += 1
         log.exception(f"Groq error: {e}")
@@ -158,7 +225,7 @@ def ask_ai(user_text: str) -> str:
 def generate_silly_name() -> str:
     try:
         completion = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant"),
             messages=[
                 {
                     "role": "system",
@@ -183,7 +250,7 @@ def generate_silly_name() -> str:
 def generate_poll() -> tuple[str, list[str]]:
     try:
         completion = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant"),
             messages=[
                 {
                     "role": "system",
@@ -218,7 +285,7 @@ def generate_poll() -> tuple[str, list[str]]:
 def generate_location_caption(lat: float, lon: float) -> str:
     try:
         completion = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant"),
             messages=[
                 {
                     "role": "system",
@@ -250,7 +317,6 @@ def random_tag_phrase(name: str) -> str:
     return random.choice(templates)
 
 
-
 def is_owner(update: Update) -> bool:
     return bool(update.effective_user and OWNER_ID and update.effective_user.id == OWNER_ID)
 
@@ -276,18 +342,25 @@ def admin_text() -> str:
     chats = len(seen_users)
     users = sum(len(v) for v in seen_users.values())
     cached_messages = sum(len(v) for v in recent_messages.values())
+    personal_contexts = len(user_context)
+    personal_context_messages = sum(len(v) for v in user_context.values())
     chaos_on = len(CHAOS_ENABLED_CHATS)
+
     return (
         "🤡 <b>Админ-панель Шлюпы</b>\n\n"
         f"Аптайм: <code>{uptime}</code>\n"
         f"Чатов в памяти: <code>{chats}</code>\n"
         f"Юзеров в памяти: <code>{users}</code>\n"
         f"Кэш сообщений: <code>{cached_messages}</code>\n"
+        f"Личных контекстов: <code>{personal_contexts}</code>\n"
+        f"Сообщений в личном контексте: <code>{personal_context_messages}</code>\n"
         f"Входящих сообщений: <code>{BOT_STATS['messages']}</code>\n"
         f"AI-запросов: <code>{BOT_STATS['ai_requests']}</code>\n"
         f"Действий хаоса: <code>{BOT_STATS['chaos_actions']}</code>\n"
         f"Ошибок: <code>{BOT_STATS['errors']}</code>\n"
         f"Хаос активен в чатах: <code>{chaos_on}</code>\n\n"
+        f"Модель: <code>{os.environ.get('GROQ_MODEL', 'llama-3.1-8b-instant')}</code>\n"
+        f"MAX_USER_CONTEXT_MESSAGES: <code>{MAX_USER_CONTEXT_MESSAGES}</code>\n"
         f"RANDOM_REPLY_CHANCE: <code>{RANDOM_REPLY_CHANCE}</code>\n"
         f"CHAOS_INTERVAL_SECONDS: <code>{CHAOS_INTERVAL_SECONDS}</code>\n"
         f"CHAOS_TRIGGER_CHANCE: <code>{CHAOS_TRIGGER_CHANCE}</code>\n\n"
@@ -295,6 +368,7 @@ def admin_text() -> str:
         "<code>/panel</code> — эта панель\n"
         "<code>/stats</code> — статистика\n"
     )
+
 
 # ---------- TELEGRAM ЛОГИКА ----------
 
@@ -323,9 +397,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
+    user = update.effective_user
+    user_id = user.id if user else 0
+    username = user.username or user.first_name or "кто-то" if user else "кто-то"
+
     BOT_STATS["messages"] += 1
-    remember_user(chat_id, update.effective_user)
-    remember_message(chat_id, update.effective_user, msg.text)
+    remember_user(chat_id, user)
+    remember_message(chat_id, user, msg.text)
     ensure_chaos_running(chat_id, context.job_queue)
 
     bot_username = context.bot.username
@@ -344,7 +422,12 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = msg.text.replace(f"@{bot_username}", "").strip() if bot_username else msg.text.strip()
-    reply = ask_ai(text or "скажи что-нибудь тупое")
+    reply = ask_ai(
+        text or "скажи что-нибудь тупое",
+        chat_id=chat_id,
+        user_id=user_id,
+        username=username,
+    )
     await msg.reply_text(reply)
 
 
@@ -354,7 +437,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
-    remember_user(chat_id, update.effective_user)
+    user = update.effective_user
+    user_id = user.id if user else 0
+    username = user.username or user.first_name or "кто-то" if user else "кто-то"
+
+    remember_user(chat_id, user)
+    remember_message(chat_id, user, "/start")
     ensure_chaos_running(chat_id, context.job_queue)
 
     if is_owner(update):
@@ -363,7 +451,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     start_text = ask_ai(
         "Юзер написал /start. Ответь как тупой матерящийся клоун, коротко, "
-        "скажи что бот живой и теперь будет творить дичь."
+        "скажи что бот живой и теперь будет творить дичь.",
+        chat_id=chat_id,
+        user_id=user_id,
+        username=username,
     )
     await msg.reply_text(start_text)
 
@@ -443,7 +534,10 @@ async def chaos_job(context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id, random_tag_phrase(name))
 
         elif action == "message":
-            await context.bot.send_message(chat_id, ask_ai("скажи что-нибудь внезапное и тупое"))
+            await context.bot.send_message(
+                chat_id,
+                ask_ai("скажи что-нибудь внезапное и тупое")
+            )
 
         elif action == "copy":
             history = recent_messages.get(chat_id, [])
