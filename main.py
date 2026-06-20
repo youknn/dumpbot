@@ -446,6 +446,47 @@ def format_uptime(seconds: float) -> str:
     parts.append(f"{seconds}с")
     return " ".join(parts)
 
+
+def find_known_user_name(user_id: int) -> str:
+    for users in seen_users.values():
+        if user_id in users:
+            return users[user_id]
+    return str(user_id)
+
+
+def top_token_users_text(limit: int = 10) -> str:
+    day = today_key()
+    rows = []
+
+    for user_id, data in user_daily_tokens.items():
+        if data.get("date") != day:
+            continue
+
+        tokens = int(data.get("tokens", 0) or 0)
+        if tokens <= 0:
+            continue
+
+        name = find_known_user_name(int(user_id))
+        rows.append((tokens, int(user_id), name))
+
+    rows.sort(reverse=True)
+
+    if not rows:
+        return "Топ токеножоров сегодня: <code>пока пусто</code>\n"
+
+    lines = ["<b>ТОП токеножоров сегодня:</b>"]
+    for i, (tokens, user_id, name) in enumerate(rows[:limit], start=1):
+        if user_id == OWNER_ID:
+            limit_text_part = "∞"
+        else:
+            limit_text_part = str(DAILY_USER_TOKEN_LIMIT)
+
+        safe_name = str(name).replace("<", "").replace(">", "")
+        lines.append(f"{i}. @{safe_name} — <code>{tokens}/{limit_text_part}</code>")
+
+    return "\n".join(lines) + "\n"
+
+
 def admin_text() -> str:
     uptime = format_uptime(time.time() - START_TIME)
     last_update_ago = int(time.time() - BOT_STATS["last_update_ts"]) if BOT_STATS["last_update_ts"] else "нет"
@@ -470,6 +511,7 @@ def admin_text() -> str:
         f"Prompt tokens: <code>{BOT_STATS['prompt_tokens']}</code>\n"
         f"Completion tokens: <code>{BOT_STATS['completion_tokens']}</code>\n"
         f"Total tokens: <code>{BOT_STATS['total_tokens']}</code>\n\n"
+        f"{top_token_users_text()}\n"
         f"Модель: <code>{GROQ_MODEL}</code>\n"
         f"TEMPERATURE: <code>{TEMPERATURE}</code>\n"
         f"MAX_USER_CONTEXT_MESSAGES: <code>{MAX_USER_CONTEXT_MESSAGES}</code>\n"
@@ -478,7 +520,7 @@ def admin_text() -> str:
         f"CHAOS_INTERVAL_SECONDS: <code>{CHAOS_INTERVAL_SECONDS}</code>\n"
         f"CHAOS_TRIGGER_CHANCE: <code>{CHAOS_TRIGGER_CHANCE}</code>\n"
         f"Хаос активен в чатах: <code>{len(CHAOS_ENABLED_CHATS)}</code>\n\n"
-        "Команды:\n<code>/start</code>\n<code>/panel</code>\n<code>/stats</code>\n"
+        "Команды:\n<code>/start</code>\n<code>/panel</code>\n"
     )
 
 async def owner_only(update: Update) -> bool:
@@ -536,13 +578,6 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     BOT_STATS["commands"] += 1
     BOT_STATS["last_update_ts"] = time.time()
     log.warning(f"/panel received from user={update.effective_user.id if update.effective_user else None}")
-    if not await owner_only(update): return
-    await update.message.reply_text(admin_text(), parse_mode="HTML")
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    BOT_STATS["commands"] += 1
-    BOT_STATS["last_update_ts"] = time.time()
-    log.warning(f"/stats received from user={update.effective_user.id if update.effective_user else None}")
     if not await owner_only(update): return
     await update.message.reply_text(admin_text(), parse_mode="HTML")
 
@@ -664,7 +699,6 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("panel", panel_command))
-    app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(ChatMemberHandler(on_bot_added_to_chat, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     app.add_error_handler(error_handler)
