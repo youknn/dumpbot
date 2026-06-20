@@ -24,6 +24,7 @@ UptimeRobot URL:
 import os
 import random
 import logging
+import asyncio
 from threading import Thread
 
 from flask import Flask
@@ -352,6 +353,10 @@ async def chaos_job(context: ContextTypes.DEFAULT_TYPE):
 # ---------- START ----------
 
 def main() -> None:
+    # Python 3.14 на Render иногда стартует без event loop в MainThread.
+    # Эта строка чинит ошибку: RuntimeError: There is no current event loop.
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
     # Сначала HTTP-сервер, чтобы Render видел открытый порт.
     Thread(target=run_web_server, daemon=True).start()
 
@@ -360,10 +365,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 
     log.info("Telegram-бот запущен через polling. Render Web Service готов для UptimeRobot.")
-    app.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        close_loop=False,
-    )
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
