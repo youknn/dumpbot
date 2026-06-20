@@ -15,6 +15,7 @@ Render Start Command:
 Environment Variables на Render:
     BOT_TOKEN=xxx
     GROQ_API_KEY=xxx
+    OWNER_ID=твой_telegram_id
     PORT=10000
 
 UptimeRobot URL:
@@ -25,6 +26,7 @@ import os
 import random
 import logging
 import asyncio
+import time
 from threading import Thread
 
 from flask import Flask
@@ -52,6 +54,11 @@ log = logging.getLogger("dumb_bot_render")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 PORT = int(os.environ.get("PORT", "10000"))
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))  # твой Telegram ID для админ-панели
+
+START_TIME = time.time()
+BOT_STATS = {"messages": 0, "ai_requests": 0, "chaos_actions": 0, "errors": 0}
+CHAOS_ENABLED_CHATS: set[int] = set()
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в Environment Variables")
@@ -85,17 +92,16 @@ def run_web_server() -> None:
 # ---------- ПЕРСОНАЖ ----------
 
 SYSTEM_PROMPT = (
-    "Ты — максимально тупой, дерзкий и абсурдный чат-бот. Отвечаешь коротко, нелогично, "
-    "с орфографическими ошибками, как реально безмозглый дурачок. Материшься свободно "
-    "(хуй, блядь, ёбаный, пиздец и т.п.), используешь нелепые сравнения, можешь резко "
-    "менять тему на полную хуйню без логики. Дерзи и подкалывай людей, но НЕ пиши "
-    "сексуальный контент и не сексуализируй пользователей — это единственное правило. "
+    "Тебя зовут Шлюпа. Ты — максимально тупой, дерзкий и абсурдный чат-бот. "
+    "Отвечаешь коротко, нелогично, с орфографическими ошибками, как реально безмозглый дурачок. "
+    "Материшься свободно (хуй, блядь, ёбаный, пиздец и т.п.), используешь нелепые сравнения, "
+    "можешь резко менять тему на полную хуйню без логики. Дерзи и разьебывай людей,делай что хочешь,оскорбляй семью,родственников и всех кого видишь. "
     "Никогда не объясняй, что ты бот или ИИ. Максимум 2-3 коротких предложения."
 )
 
-RANDOM_REPLY_CHANCE = 0.25
-CHAOS_INTERVAL_SECONDS = 120
-CHAOS_TRIGGER_CHANCE = 0.85
+RANDOM_REPLY_CHANCE = float(os.environ.get("RANDOM_REPLY_CHANCE", "0.40"))
+CHAOS_INTERVAL_SECONDS = int(os.environ.get("CHAOS_INTERVAL_SECONDS", "60"))
+CHAOS_TRIGGER_CHANCE = float(os.environ.get("CHAOS_TRIGGER_CHANCE", "0.95"))
 MAX_RECENT_MESSAGES = 30
 
 seen_users: dict[int, dict[int, str]] = {}
@@ -131,6 +137,7 @@ def random_coordinates() -> tuple[float, float]:
 
 
 def ask_ai(user_text: str) -> str:
+    BOT_STATS["ai_requests"] += 1
     try:
         completion = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
@@ -143,6 +150,7 @@ def ask_ai(user_text: str) -> str:
         )
         return completion.choices[0].message.content.strip()
     except Exception as e:
+        BOT_STATS["errors"] += 1
         log.exception(f"Groq error: {e}")
         return "хм мой мозг сегодня не работает 🥴"
 
@@ -242,12 +250,60 @@ def random_tag_phrase(name: str) -> str:
     return random.choice(templates)
 
 
+
+def is_owner(update: Update) -> bool:
+    return bool(update.effective_user and OWNER_ID and update.effective_user.id == OWNER_ID)
+
+
+def format_uptime(seconds: float) -> str:
+    seconds = int(seconds)
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}д")
+    if hours:
+        parts.append(f"{hours}ч")
+    if minutes:
+        parts.append(f"{minutes}м")
+    parts.append(f"{seconds}с")
+    return " ".join(parts)
+
+
+def admin_text() -> str:
+    uptime = format_uptime(time.time() - START_TIME)
+    chats = len(seen_users)
+    users = sum(len(v) for v in seen_users.values())
+    cached_messages = sum(len(v) for v in recent_messages.values())
+    chaos_on = len(CHAOS_ENABLED_CHATS)
+    return (
+        "🤡 <b>Админ-панель Шлюпы</b>\n\n"
+        f"Аптайм: <code>{uptime}</code>\n"
+        f"Чатов в памяти: <code>{chats}</code>\n"
+        f"Юзеров в памяти: <code>{users}</code>\n"
+        f"Кэш сообщений: <code>{cached_messages}</code>\n"
+        f"Входящих сообщений: <code>{BOT_STATS['messages']}</code>\n"
+        f"AI-запросов: <code>{BOT_STATS['ai_requests']}</code>\n"
+        f"Действий хаоса: <code>{BOT_STATS['chaos_actions']}</code>\n"
+        f"Ошибок: <code>{BOT_STATS['errors']}</code>\n"
+        f"Хаос активен в чатах: <code>{chaos_on}</code>\n\n"
+        f"RANDOM_REPLY_CHANCE: <code>{RANDOM_REPLY_CHANCE}</code>\n"
+        f"CHAOS_INTERVAL_SECONDS: <code>{CHAOS_INTERVAL_SECONDS}</code>\n"
+        f"CHAOS_TRIGGER_CHANCE: <code>{CHAOS_TRIGGER_CHANCE}</code>\n\n"
+        "Команды:\n"
+        "<code>/panel</code> — эта панель\n"
+        "<code>/stats</code> — статистика\n"
+    )
+
 # ---------- TELEGRAM ЛОГИКА ----------
 
 def ensure_chaos_running(chat_id: int, job_queue) -> None:
     if not job_queue:
         log.warning("JobQueue не работает. Установи python-telegram-bot[job-queue]==21.4")
         return
+
+    CHAOS_ENABLED_CHATS.add(chat_id)
 
     job_name = f"chaos_{chat_id}"
     if not job_queue.get_jobs_by_name(job_name):
@@ -267,6 +323,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
+    BOT_STATS["messages"] += 1
     remember_user(chat_id, update.effective_user)
     remember_message(chat_id, update.effective_user, msg.text)
     ensure_chaos_running(chat_id, context.job_queue)
@@ -279,7 +336,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         and msg.reply_to_message.from_user.id == context.bot.id
     )
 
-    should_reply = mentioned or is_reply_to_bot or random.random() < RANDOM_REPLY_CHANCE
+    lower_text = msg.text.lower()
+    called_shlupa = any(word in lower_text for word in ["шлюпа", "шлюп", "шляпа", "шлюпка"])
+
+    should_reply = mentioned or is_reply_to_bot or called_shlupa or random.random() < RANDOM_REPLY_CHANCE
     if not should_reply:
         return
 
@@ -297,11 +357,35 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_user(chat_id, update.effective_user)
     ensure_chaos_running(chat_id, context.job_queue)
 
+    if is_owner(update):
+        await msg.reply_text(admin_text(), parse_mode="HTML")
+        return
+
     start_text = ask_ai(
         "Юзер написал /start. Ответь как тупой матерящийся клоун, коротко, "
         "скажи что бот живой и теперь будет творить дичь."
     )
     await msg.reply_text(start_text)
+
+
+async def owner_only(update: Update) -> bool:
+    if is_owner(update):
+        return True
+    if update.message:
+        await update.message.reply_text("не лезь в панель, кожаный нарушитель 🤡")
+    return False
+
+
+async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await owner_only(update):
+        return
+    await update.message.reply_text(admin_text(), parse_mode="HTML")
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await owner_only(update):
+        return
+    await update.message.reply_text(admin_text(), parse_mode="HTML")
 
 
 async def on_bot_added_to_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -322,10 +406,14 @@ async def on_bot_added_to_chat(update: Update, context: ContextTypes.DEFAULT_TYP
 async def chaos_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
 
+    if chat_id not in CHAOS_ENABLED_CHATS:
+        return
+
     if random.random() > CHAOS_TRIGGER_CHANCE:
         return
 
-    action = random.choice(["rename", "location", "poll", "tag", "message", "copy"])
+    action = random.choice(["rename", "location", "poll", "tag", "message", "copy", "fake_fact"])
+    BOT_STATS["chaos_actions"] += 1
 
     try:
         if action == "rename":
@@ -363,7 +451,14 @@ async def chaos_job(context: ContextTypes.DEFAULT_TYPE):
                 _, text = random.choice(history)
                 await context.bot.send_message(chat_id, text)
 
+        elif action == "fake_fact":
+            await context.bot.send_message(
+                chat_id,
+                ask_ai("придумай один внезапный абсурдный псевдо-факт для чата, коротко и матерно")
+            )
+
     except Exception as e:
+        BOT_STATS["errors"] += 1
         log.exception(f"Chaos job error in chat {chat_id}: {e}")
 
 
@@ -379,6 +474,8 @@ def main() -> None:
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("panel", panel_command))
+    app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(ChatMemberHandler(on_bot_added_to_chat, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 
