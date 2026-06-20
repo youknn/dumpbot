@@ -32,6 +32,7 @@ from telegram import Update
 from telegram.ext import (
     Application,
     MessageHandler,
+    CommandHandler,
     ChatMemberHandler,
     ContextTypes,
     filters,
@@ -92,9 +93,9 @@ SYSTEM_PROMPT = (
     "Никогда не объясняй, что ты бот или ИИ. Максимум 2-3 коротких предложения."
 )
 
-RANDOM_REPLY_CHANCE = 0.08
-CHAOS_INTERVAL_SECONDS = 600
-CHAOS_TRIGGER_CHANCE = 0.5
+RANDOM_REPLY_CHANCE = 0.25
+CHAOS_INTERVAL_SECONDS = 120
+CHAOS_TRIGGER_CHANCE = 0.85
 MAX_RECENT_MESSAGES = 30
 
 seen_users: dict[int, dict[int, str]] = {}
@@ -255,7 +256,7 @@ def ensure_chaos_running(chat_id: int, job_queue) -> None:
             interval=CHAOS_INTERVAL_SECONDS,
             chat_id=chat_id,
             name=job_name,
-            first=10,
+            first=20,
         )
         log.info(f"Хаос запущен в чате {chat_id}")
 
@@ -285,6 +286,22 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text.replace(f"@{bot_username}", "").strip() if bot_username else msg.text.strip()
     reply = ask_ai(text or "скажи что-нибудь тупое")
     await msg.reply_text(reply)
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg:
+        return
+
+    chat_id = update.effective_chat.id
+    remember_user(chat_id, update.effective_user)
+    ensure_chaos_running(chat_id, context.job_queue)
+
+    start_text = ask_ai(
+        "Юзер написал /start. Ответь как тупой матерящийся клоун, коротко, "
+        "скажи что бот живой и теперь будет творить дичь."
+    )
+    await msg.reply_text(start_text)
 
 
 async def on_bot_added_to_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -361,6 +378,7 @@ def main() -> None:
     Thread(target=run_web_server, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(ChatMemberHandler(on_bot_added_to_chat, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 
