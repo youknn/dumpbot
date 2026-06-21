@@ -127,6 +127,7 @@ class _OpenModelCompletions:
             messages=chat_messages,
         )
 
+        BOT_STATS["last_ai_raw"] = short_debug(response)
         log.warning(f"RAW OPENMODEL RESPONSE: {response}")
 
         text_parts = []
@@ -156,8 +157,9 @@ class _OpenModelCompletions:
         text = "".join(text_parts).strip()
 
         if not text:
+            BOT_STATS["last_ai_error"] = "openmodel returned empty text"
             log.warning(f"OPENMODEL EMPTY TEXT RESPONSE: {response}")
-            text = "я чёта сломалась, пиздец"
+            text = "openmodel вернул пустой ответ, смотри /panel"
 
         usage = getattr(response, "usage", None)
         compat_usage = _CompatUsage(
@@ -195,6 +197,9 @@ BOT_STATS = {
     "title_of_day_sent": 0,
     "last_update_ts": 0,
     "last_ai_ts": 0,
+    "last_ai_error": "",
+    "last_ai_raw": "",
+    "last_ai_answer": "",
 }
 
 last_ai_lock = threading.Lock()
@@ -244,6 +249,13 @@ SYSTEM_PROMPT = (
     "Всегда сначала хотя бы чуть-чуть отвечай на вопрос пользователя по смыслу, а уже потом неси хуйню. "
     "Если пользователь продолжает прошлую тему, учитывай контекст."
 )
+
+def short_debug(value, limit: int = 900) -> str:
+    text = str(value)
+    text = text.replace("<", "(").replace(">", ")")
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text
 
 def remember_user(chat_id: int, user) -> None:
     if not user:
@@ -458,7 +470,8 @@ def ask_ai(user_text: str, chat_id: int | None = None, user_id: int | None = Non
             BOT_STATS["total_tokens"] += total_used
             if user_id is not None and not ignore_user_limit:
                 add_user_daily_tokens(user_id, total_used)
-        answer = completion.choices[0].message.content.strip() or "я чёта сломалась, пиздец"
+        answer = completion.choices[0].message.content.strip() or "openmodel вернул пустой ответ, смотри /panel"
+        BOT_STATS["last_ai_answer"] = short_debug(answer)
         log.warning(f"AI EXTRACTED ANSWER: {answer!r}")
         if chat_id is not None and user_id is not None:
             history = get_user_history(chat_id, user_id)
@@ -468,8 +481,9 @@ def ask_ai(user_text: str, chat_id: int | None = None, user_id: int | None = Non
         return answer
     except Exception as e:
         BOT_STATS["errors"] += 1
+        BOT_STATS["last_ai_error"] = short_debug(repr(e), 900)
         log.exception(f"OpenModel error: {e}")
-        return "openmodel опять подавился, я временно овощ 🥴"
+        return f"openmodel упал: {type(e).__name__}. смотри /panel"
 
 def random_coordinates() -> tuple[float, float]:
     return random.uniform(-85.0, 85.0), random.uniform(-180.0, 180.0)
@@ -634,7 +648,10 @@ def admin_text() -> str:
         f"Титулов дня выдано: <code>{BOT_STATS['title_of_day_sent']}</code>\n\n"
         f"Prompt tokens: <code>{BOT_STATS['prompt_tokens']}</code>\n"
         f"Completion tokens: <code>{BOT_STATS['completion_tokens']}</code>\n"
-        f"Total tokens: <code>{BOT_STATS['total_tokens']}</code>\n\n"
+        f"Total tokens: <code>{BOT_STATS['total_tokens']}</code>\n"
+        f"Последняя AI ошибка: <code>{BOT_STATS.get('last_ai_error', '') or 'нет'}</code>\n"
+        f"Последний AI ответ: <code>{BOT_STATS.get('last_ai_answer', '') or 'нет'}</code>\n"
+        f"Последний RAW: <code>{BOT_STATS.get('last_ai_raw', '') or 'нет'}</code>\n\n"
         f"{top_token_users_text()}\n"
         f"Провайдер: <code>OpenModel / DeepSeek</code>\n"
         f"Модель: <code>{GROQ_MODEL}</code>\n"
