@@ -7,12 +7,12 @@ Render:
 
 ENV:
   BOT_TOKEN=xxx
-  GROQ_API_KEY=xxx
+  OPENMODEL_API_KEY=xxx
   OWNER_ID=123456789
   PORT=10000
 
 Optional ENV:
-  GROQ_MODEL=llama-3.1-8b-instant
+  OPENMODEL_MODEL=deepseek-v4-flash
   RANDOM_REPLY_CHANCE=0.10
   CHAOS_INTERVAL_SECONDS=240
   CHAOS_TRIGGER_CHANCE=0.45
@@ -39,7 +39,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from groq import Groq
+import anthropic
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,11 +48,12 @@ logging.basicConfig(
 log = logging.getLogger("shlupa_render")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+OPENMODEL_API_KEY = os.environ.get("OPENMODEL_API_KEY", "").strip() or os.environ.get("GROQ_API_KEY", "").strip()
+OPENMODEL_BASE_URL = os.environ.get("OPENMODEL_BASE_URL", "https://api.openmodel.ai").strip()
 PORT = int(os.environ.get("PORT", "10000"))
 OWNER_ID = int(os.environ.get("OWNER_ID", "0") or "0")
 
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_MODEL = os.environ.get("OPENMODEL_MODEL", os.environ.get("GROQ_MODEL", "deepseek-v4-flash"))
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "100"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "1.0"))
 
@@ -69,10 +70,89 @@ LEAVE_GROUP_CHANCE = float(os.environ.get("LEAVE_GROUP_CHANCE", "0.01"))
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в Environment Variables")
-if not GROQ_API_KEY:
-    raise RuntimeError("Не задан GROQ_API_KEY в Environment Variables")
+if not OPENMODEL_API_KEY:
+    raise RuntimeError("Не задан OPENMODEL_API_KEY в Environment Variables")
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+openmodel_client = anthropic.Anthropic(
+    api_key=OPENMODEL_API_KEY,
+    base_url=OPENMODEL_BASE_URL,
+)
+
+
+class _CompatMessage:
+    def __init__(self, content: str):
+        self.content = content
+
+
+class _CompatChoice:
+    def __init__(self, content: str):
+        self.message = _CompatMessage(content)
+
+
+class _CompatUsage:
+    def __init__(self, prompt_tokens: int = 0, completion_tokens: int = 0):
+        self.prompt_tokens = int(prompt_tokens or 0)
+        self.completion_tokens = int(completion_tokens or 0)
+        self.total_tokens = self.prompt_tokens + self.completion_tokens
+
+
+class _CompatCompletion:
+    def __init__(self, text: str, usage: _CompatUsage):
+        self.choices = [_CompatChoice(text)]
+        self.usage = usage
+
+
+class _OpenModelCompletions:
+    def create(self, model: str, messages: list[dict], max_tokens: int, temperature: float = 1.0, **kwargs):
+        system_parts = []
+        chat_messages = []
+
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = str(msg.get("content", ""))
+
+            if role == "system":
+                system_parts.append(content)
+            elif role in ("user", "assistant"):
+                chat_messages.append({"role": role, "content": content})
+
+        if not chat_messages:
+            chat_messages = [{"role": "user", "content": "скажи что-нибудь"}]
+
+        response = openmodel_client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system="\n\n".join(system_parts) if system_parts else None,
+            messages=chat_messages,
+        )
+
+        text_parts = []
+        for block in response.content:
+            if getattr(block, "type", None) == "text":
+                text_parts.append(block.text)
+
+        text = "".join(text_parts).strip()
+
+        usage = getattr(response, "usage", None)
+        compat_usage = _CompatUsage(
+            prompt_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
+            completion_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+        )
+        return _CompatCompletion(text, compat_usage)
+
+
+class _OpenModelChat:
+    def __init__(self):
+        self.completions = _OpenModelCompletions()
+
+
+class _OpenModelCompatClient:
+    def __init__(self):
+        self.chat = _OpenModelChat()
+
+
+groq_client = _OpenModelCompatClient()
 START_TIME = time.time()
 
 BOT_STATS = {
@@ -362,8 +442,8 @@ def ask_ai(user_text: str, chat_id: int | None = None, user_id: int | None = Non
         return answer
     except Exception as e:
         BOT_STATS["errors"] += 1
-        log.exception(f"Groq error: {e}")
-        return "groq опять подавился, я временно овощ 🥴"
+        log.exception(f"OpenModel error: {e}")
+        return "openmodel опять подавился, я временно овощ 🥴"
 
 def random_coordinates() -> tuple[float, float]:
     return random.uniform(-85.0, 85.0), random.uniform(-180.0, 180.0)
@@ -396,7 +476,7 @@ def generate_silly_name() -> str:
 
     except Exception as e:
         BOT_STATS["errors"] += 1
-        log.exception(f"Groq name error: {e}")
+        log.exception(f"OpenModel name error: {e}")
         return "министерство ебаных кабачков"
 
 
@@ -420,7 +500,7 @@ def generate_poll() -> tuple[str, list[str]]:
         return question, options
     except Exception as e:
         BOT_STATS["errors"] += 1
-        log.exception(f"Groq poll error: {e}")
+        log.exception(f"OpenModel poll error: {e}")
         return "что делать дальше нахуй", ["хуй знает", "ничего", "всё сразу", "забыть вопрос"]
 
 def generate_location_caption(lat: float, lon: float) -> str:
@@ -437,7 +517,7 @@ def generate_location_caption(lat: float, lon: float) -> str:
         return completion.choices[0].message.content.strip().strip('"')
     except Exception as e:
         BOT_STATS["errors"] += 1
-        log.exception(f"Groq location caption error: {e}")
+        log.exception(f"OpenModel location caption error: {e}")
         return "я тут, не благодарите 📍"
 
 def random_tag_phrase(name: str) -> str:
@@ -530,6 +610,7 @@ def admin_text() -> str:
         f"Completion tokens: <code>{BOT_STATS['completion_tokens']}</code>\n"
         f"Total tokens: <code>{BOT_STATS['total_tokens']}</code>\n\n"
         f"{top_token_users_text()}\n"
+        f"Провайдер: <code>OpenModel / DeepSeek</code>\n"
         f"Модель: <code>{GROQ_MODEL}</code>\n"
         f"TEMPERATURE: <code>{TEMPERATURE}</code>\n"
         f"MAX_USER_CONTEXT_MESSAGES: <code>{MAX_USER_CONTEXT_MESSAGES}</code>\n"
