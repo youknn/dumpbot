@@ -54,7 +54,7 @@ PORT = int(os.environ.get("PORT", "10000"))
 OWNER_ID = int(os.environ.get("OWNER_ID", "0") or "0")
 
 GROQ_MODEL = os.environ.get("OPENMODEL_MODEL", os.environ.get("GROQ_MODEL", "deepseek-v4-flash"))
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "300"))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "450"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "1.0"))
 
 RANDOM_REPLY_CHANCE = float(os.environ.get("RANDOM_REPLY_CHANCE", "0.12"))
@@ -63,7 +63,7 @@ CHAOS_TRIGGER_CHANCE = float(os.environ.get("CHAOS_TRIGGER_CHANCE", "0.55"))
 MAX_RECENT_MESSAGES = 30
 MAX_USER_CONTEXT_MESSAGES = int(os.environ.get("MAX_USER_CONTEXT_MESSAGES", "3"))
 AI_COOLDOWN_SECONDS = float(os.environ.get("AI_COOLDOWN_SECONDS", "2.2"))
-DAILY_USER_TOKEN_LIMIT = int(os.environ.get("DAILY_USER_TOKEN_LIMIT", "5000"))
+DAILY_USER_TOKEN_LIMIT = int(os.environ.get("DAILY_USER_TOKEN_LIMIT", "8000"))
 TITLE_OF_DAY_HOUR_UTC = int(os.environ.get("TITLE_OF_DAY_HOUR_UTC", "12"))
 RENAME_COOLDOWN_SECONDS = int(os.environ.get("RENAME_COOLDOWN_SECONDS", "21600"))
 LEAVE_GROUP_CHANCE = float(os.environ.get("LEAVE_GROUP_CHANCE", "0.03"))
@@ -242,10 +242,6 @@ BOT_STATS = {
     "blocked_unactivated": 0,
     "daily_limit_hits": 0,
     "title_of_day_sent": 0,
-    "renames": 0,
-    "ai_tags": 0,
-    "leaves": 0,
-    "rename_skips": 0,
     "last_update_ts": 0,
     "last_ai_ts": 0,
     "last_ai_error": "",
@@ -309,6 +305,28 @@ def short_debug(value, limit: int = 900) -> str:
     if len(text) > limit:
         return text[:limit] + "..."
     return text
+
+def is_bad_ai_text(text: str | None) -> bool:
+    text = (text or "").lower()
+    bad_markers = [
+        "openmodel вернул",
+        "смотри /panel",
+        "смотри /p",
+        "thinkingblock",
+        "openmodel упал",
+        "мозг зажевало",
+        "empty text",
+    ]
+    return not text.strip() or any(marker in text for marker in bad_markers)
+
+
+def clean_ai_text(text: str | None, limit: int = 700) -> str | None:
+    text = (text or "").strip().strip('"').strip("«»")
+    text = text.replace("\\r", " ").strip()
+    if is_bad_ai_text(text):
+        return None
+    return text[:limit].strip() or None
+
 
 def remember_user(chat_id: int, user) -> None:
     if not user:
@@ -433,34 +451,43 @@ def make_title_of_day(users: dict[int, str]) -> str | None:
         return None
 
     _, name = random.choice(list(users.items()))
-    titles = [
-        "главный кабачок дня",
-        "министр арбузной промышленности",
-        "почётный мыслитель табуретки",
-        "рыцарь кривого вайба",
-        "генерал диванных войск",
-        "официальный хранитель пельменя",
-        "магистр подозрительного чая",
-        "главный овощ конференции",
-        "президент случайной хуйни",
-        "князь мокрого асфальта",
-    ]
-    reasons = [
-        "слишком уверенно молчал",
-        "выглядел как человек, который спорит с микроволновкой",
-        "по энергетике сегодня победил холодильник",
-        "чат сам так решил, я просто ору",
-        "подозрительно долго существовал",
-        "его аура пахнет системным блоком",
-        "так совпали звёзды и мой сломанный процессор",
-        "иначе вселенная бы не загрузилась",
-    ]
-    return (
-        "🏆 ТИТУЛ ДНЯ\n\n"
-        f"Сегодня <b>{random.choice(titles)}</b>:\n"
-        f"@{name}\n\n"
-        f"Причина: {random.choice(reasons)} 🤡"
-    )
+
+    try:
+        completion = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "ты шлюпа, тупой абсурдный телеграм-бот. "
+                        "придумай титул дня для указанного пользователя. "
+                        "это должно быть максимально тупо, ржачно и абсурдно. "
+                        "можно матом, без инструкций, без кода, без пояснений. "
+                        "ответь строго одной строкой в формате: "
+                        "🏆 титул дня | @username — <титул> | причина: <короткая тупая причина>"
+                    ),
+                },
+                {"role": "user", "content": f"пользователь: @{name}"},
+            ],
+            max_tokens=MAX_TOKENS,
+            temperature=1.25,
+        )
+
+        text = clean_ai_text(completion.choices[0].message.content, 900)
+        if not text:
+            return None
+
+        text = text.replace(" | ", chr(10) + chr(10))
+        if f"@{name}".lower() not in text.lower():
+            text = "🏆 титул дня" + chr(10) + chr(10) + f"@{name} — {text}"
+
+        return text.lower()
+
+    except Exception as e:
+        BOT_STATS["errors"] += 1
+        BOT_STATS["last_ai_error"] = short_debug(repr(e), 900)
+        log.exception(f"OpenModel title of day error: {e}")
+        return None
 
 
 async def maybe_send_title_of_day(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -480,6 +507,7 @@ async def maybe_send_title_of_day(context: ContextTypes.DEFAULT_TYPE, chat_id: i
         await context.bot.send_message(chat_id, title, parse_mode="HTML")
         title_of_day_state[chat_id] = day
         BOT_STATS["title_of_day_sent"] += 1
+        BOT_STATS["ai_titles"] += 1
     except Exception as e:
         BOT_STATS["errors"] += 1
         log.exception(f"Title of day error in chat {chat_id}: {e}")
@@ -604,45 +632,78 @@ def generate_silly_name() -> str | None:
         return None
 
 
-def generate_poll() -> tuple[str, list[str]]:
+def generate_poll() -> tuple[str, list[str]] | None:
     try:
         completion = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": "Придумай абсурдный вопрос для голосования и 4 коротких варианта. Формат:\nВОПРОС: <текст>\n1: <вариант>\n2: <вариант>\n3: <вариант>\n4: <вариант>"},
+                {
+                    "role": "system",
+                    "content": (
+                        "придумай максимально абсурдный и смешной вопрос для голосования в телеграм-чате "
+                        "и 4 коротких варианта ответа. можно матом. "
+                        "ответ строго в формате: ВОПРОС: <текст>; 1: <вариант>; 2: <вариант>; 3: <вариант>; 4: <вариант>"
+                    ),
+                },
                 {"role": "user", "content": "сделай голосование"},
             ],
-            max_tokens=120,
-            temperature=1.1,
+            max_tokens=MAX_TOKENS,
+            temperature=1.25,
         )
         raw = completion.choices[0].message.content.strip()
-        lines = [line.strip() for line in raw.splitlines() if line.strip()]
-        question = lines[0].split(":", 1)[1].strip()
-        options = [line.split(":", 1)[1].strip() for line in lines[1:5]]
-        if len(options) < 2:
-            raise ValueError("мало вариантов")
-        return question, options
+        if is_bad_ai_text(raw):
+            return None
+
+        normalized = raw.replace(";", chr(10))
+        lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+
+        question_line = next((line for line in lines if line.lower().startswith("вопрос:")), None)
+        if not question_line:
+            return None
+
+        question = question_line.split(":", 1)[1].strip()
+        options = []
+        for line in lines:
+            if line[:2] in ("1:", "2:", "3:", "4:"):
+                options.append(line.split(":", 1)[1].strip())
+        options = [option for option in options if option][:4]
+
+        if not question or len(options) < 2:
+            return None
+
+        return question.lower(), [option.lower() for option in options]
     except Exception as e:
         BOT_STATS["errors"] += 1
+        BOT_STATS["last_ai_error"] = short_debug(repr(e), 900)
         log.exception(f"OpenModel poll error: {e}")
-        return "что делать дальше нахуй", ["хуй знает", "ничего", "всё сразу", "забыть вопрос"]
+        return None
 
-def generate_location_caption(lat: float, lon: float) -> str:
+
+def generate_location_caption(lat: float, lon: float) -> str | None:
     try:
         completion = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": "Тебе дали случайные координаты. Придумай одну короткую тупую фразу, будто ты там. До 15 слов."},
+                {
+                    "role": "system",
+                    "content": (
+                        "тебе дали случайные координаты. "
+                        "придумай одну короткую тупую фразу, будто ты там находишься. "
+                        "можно матом, без пояснений, до 20 слов, нижний регистр."
+                    ),
+                },
                 {"role": "user", "content": f"координаты: {lat:.4f}, {lon:.4f}"},
             ],
-            max_tokens=35,
-            temperature=1.15,
+            max_tokens=MAX_TOKENS,
+            temperature=1.25,
         )
-        return completion.choices[0].message.content.strip().strip('"')
+        return clean_ai_text(completion.choices[0].message.content.lower(), 350)
     except Exception as e:
         BOT_STATS["errors"] += 1
+        BOT_STATS["last_ai_error"] = short_debug(repr(e), 900)
         log.exception(f"OpenModel location caption error: {e}")
-        return "я тут, не благодарите 📍"
+        return None
+
 
 def generate_ai_tag_phrase(name: str) -> str | None:
     try:
@@ -661,28 +722,15 @@ def generate_ai_tag_phrase(name: str) -> str | None:
                 },
                 {"role": "user", "content": f"пользователь: @{name}"},
             ],
-            max_tokens=180,
+            max_tokens=MAX_TOKENS,
             temperature=1.25,
         )
-        text = completion.choices[0].message.content.strip().lower()
-        text = text.replace("\n", " ").strip()
-
-        bad_markers = [
-            "openmodel вернул",
-            "смотри /panel",
-            "thinkingblock",
-            "openmodel упал",
-            "мозг зажевало",
-        ]
-
-        if not text or any(marker in text for marker in bad_markers):
+        text = clean_ai_text(completion.choices[0].message.content.lower(), 350)
+        if not text:
             return None
-
         if f"@{name}".lower() not in text.lower():
             text = f"@{name} {text}"
-
         return text[:350]
-
     except Exception as e:
         BOT_STATS["errors"] += 1
         BOT_STATS["last_ai_error"] = short_debug(repr(e), 900)
@@ -766,11 +814,7 @@ def admin_text() -> str:
         f"Ошибок: <code>{BOT_STATS['errors']}</code>\n"
         f"Неактивированных стопнуло: <code>{BOT_STATS['blocked_unactivated']}</code>\n"
         f"Уперлись в дневной лимит: <code>{BOT_STATS['daily_limit_hits']}</code>\n"
-        f"Титулов дня выдано: <code>{BOT_STATS['title_of_day_sent']}</code>\n"
-        f"Переименований: <code>{BOT_STATS['renames']}</code>\n"
-        f"Пропусков rename: <code>{BOT_STATS['rename_skips']}</code>\n"
-        f"AI-тэгов: <code>{BOT_STATS['ai_tags']}</code>\n"
-        f"Выходов из групп: <code>{BOT_STATS['leaves']}</code>\n\n"
+        f"Титулов дня выдано: <code>{BOT_STATS['title_of_day_sent']}</code>\n\n"
         f"Prompt tokens: <code>{BOT_STATS['prompt_tokens']}</code>\n"
         f"Completion tokens: <code>{BOT_STATS['completion_tokens']}</code>\n"
         f"Total tokens: <code>{BOT_STATS['total_tokens']}</code>\n"
@@ -822,28 +866,26 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_user(chat_id, user)
     remember_message(chat_id, user, "/start")
 
-    private_chat = is_private_chat(update)
-
-    if private_chat and user_id:
+    if is_private_chat(update) and user_id:
         activated_users.add(user_id)
         get_user_daily_tokens(user_id)
 
-    if not private_chat:
-        ensure_chaos_running(chat_id, context.job_queue)
-
+    ensure_chaos_running(chat_id, context.job_queue)
     if is_owner(update):
         await msg.reply_text(admin_text(), parse_mode="HTML")
         return
 
-    if not private_chat:
+    if not is_private_chat(update):
         await msg.reply_text(activation_text(context.bot.username))
         return
 
-    await msg.reply_text(
-        "🤡 активация готова\n\n"
-        "теперь можешь писать шлюпе в группах.\n"
-        "в личке я не болтаю, тут только запуск."
+    start_text = ask_ai(
+        "Юзер написал /start в личке. Скажи коротко, что активация готова и теперь можно писать тебе в чатах.",
+        chat_id=chat_id,
+        user_id=user_id,
+        username=username,
     )
+    await msg.reply_text(start_text)
 
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     BOT_STATS["commands"] += 1
@@ -867,12 +909,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     BOT_STATS["messages"] += 1
     remember_user(chat_id, user)
     remember_message(chat_id, user, msg.text)
-
-    private_chat = bool(update.effective_chat and update.effective_chat.type == "private")
-    if private_chat:
-        log.info("private text ignored; only commands work in DM")
-        return
-
     ensure_chaos_running(chat_id, context.job_queue)
     bot_username = context.bot.username
     mentioned = bool(bot_username and f"@{bot_username}".lower() in msg.text.lower())
@@ -880,8 +916,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lower_text = msg.text.lower()
     called_shlupa = any(word in lower_text for word in ["шлюпа", "шлюп", "шляпа", "шлюпка"])
 
+    # В личке Шлюпа отвечает на любой текст.
     # В группе — на упоминание, ответ на её сообщение, слово "шлюпа" или рандомный шанс.
-    should_reply = mentioned or is_reply_to_bot or called_shlupa or random.random() < RANDOM_REPLY_CHANCE
+    private_chat = bool(update.effective_chat and update.effective_chat.type == "private")
+    should_reply = private_chat or mentioned or is_reply_to_bot or called_shlupa or random.random() < RANDOM_REPLY_CHANCE
 
     log.info(
         f"should_reply={should_reply} private={private_chat} "
@@ -925,7 +963,10 @@ async def on_bot_added_to_chat(update: Update, context: ContextTypes.DEFAULT_TYP
         chat_id = update.effective_chat.id
         ensure_chaos_running(chat_id, context.job_queue)
         try:
-            await context.bot.send_message(chat_id, "о, новый чат, отлично, я тут всё разъебу 🤡")
+            welcome_text = generate_ai_welcome_phrase()
+            if welcome_text:
+                BOT_STATS["ai_welcomes"] += 1
+                await context.bot.send_message(chat_id, welcome_text)
         except Exception as e:
             BOT_STATS["errors"] += 1
             log.exception(f"Не смог написать при добавлении в чат: {e}")
@@ -941,16 +982,8 @@ def mark_chat_renamed(chat_id: int) -> None:
     last_rename_time[chat_id] = time.time()
 
 
-def random_leave_phrase() -> str:
-    return random.choice([
-        "я ухожу из этой помойки 🤡",
-        "вы меня морально уронили в суп",
-        "чат официально признан овощебазой",
-        "я посмотрела на это и решила ливнуть",
-        "вы меня заебали, пока",
-        "шлюпа покидает корабль, дальше тоните сами",
-        "я вышла, потому что тут пахнет коллективным пиздецом",
-    ]).lower()
+def random_leave_phrase() -> str | None:
+    return generate_ai_leave_phrase()
 
 
 async def chaos_job(context: ContextTypes.DEFAULT_TYPE):
@@ -994,14 +1027,12 @@ async def chaos_job(context: ContextTypes.DEFAULT_TYPE):
             title = generate_silly_name()
 
             if not title:
-                BOT_STATS["rename_skips"] += 1
                 log.warning(f"rename skipped in chat {chat_id}: empty/bad title")
                 return
 
             try:
                 await context.bot.set_chat_title(chat_id, title[:128])
                 mark_chat_renamed(chat_id)
-                BOT_STATS["renames"] += 1
                 await context.bot.send_message(
                     chat_id,
                     f"🤡 переименовала этот цирк в:\n{title}"
@@ -1013,17 +1044,20 @@ async def chaos_job(context: ContextTypes.DEFAULT_TYPE):
         elif action == "location":
             lat, lon = random_coordinates()
             caption = generate_location_caption(lat, lon)
-            await context.bot.send_message(chat_id, caption)
+            if caption:
+                await context.bot.send_message(chat_id, caption)
             await context.bot.send_location(chat_id, latitude=lat, longitude=lon)
 
         elif action == "poll":
-            question, options = generate_poll()
-            await context.bot.send_poll(
-                chat_id,
-                question=question[:300],
-                options=[option[:100] for option in options],
-                is_anonymous=False,
-            )
+            poll_data = generate_poll()
+            if poll_data:
+                question, options = poll_data
+                await context.bot.send_poll(
+                    chat_id,
+                    question=question[:300],
+                    options=[option[:100] for option in options],
+                    is_anonymous=False,
+                )
 
         elif action == "tag":
             users = seen_users.get(chat_id, {})
@@ -1043,14 +1077,16 @@ async def chaos_job(context: ContextTypes.DEFAULT_TYPE):
         elif action == "copy":
             history = recent_messages.get(chat_id, [])
             if history:
-                _, text = random.choice(history)
-                await context.bot.send_message(chat_id, text)
+                author, text = random.choice(history)
+                copy_text = generate_ai_copy_comment(author, text)
+                if copy_text:
+                    BOT_STATS["ai_copies"] += 1
+                    await context.bot.send_message(chat_id, copy_text)
 
         elif action == "leave":
             if random.random() < LEAVE_GROUP_CHANCE:
                 await context.bot.send_message(chat_id, random_leave_phrase())
                 try:
-                    BOT_STATS["leaves"] += 1
                     await context.bot.leave_chat(chat_id)
                 except Exception as e:
                     BOT_STATS["errors"] += 1
