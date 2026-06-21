@@ -125,7 +125,6 @@ class _OpenModelCompletions:
             temperature=temperature,
             system="\n\n".join(system_parts) if system_parts else None,
             messages=chat_messages,
-            extra_body={"thinking": False},
         )
 
         BOT_STATS["last_ai_raw"] = short_debug(response)
