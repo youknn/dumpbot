@@ -438,55 +438,25 @@ def ask_ai(user_text: str, chat_id: int | None = None, user_id: int | None = Non
         return limit_text()
 
     if not can_make_ai_request():
-        return random.choice([
-            "погоди, у меня мозг остывает, железный кабачок",
-            "секунду, я лимитами подавилась как чайник",
-            "я ща думаю, не мешай процессору страдать",
-        ])
-    BOT_STATS["ai_requests"] += 1
-    BOT_STATS["last_ai_ts"] = time.time()
-    try:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        if chat_id is not None and user_id is not None:
-            messages.append({
-                "role": "system",
-                "content": "Короткий контекст чата. Используй его только чтобы понять тему, но не пересказывай напрямую.\n\n" + build_recent_chat_context(chat_id),
-            })
-            messages.extend(get_user_history(chat_id, user_id)[-MAX_USER_CONTEXT_MESSAGES:])
-            messages.append({"role": "user", "content": f"{username}: {user_text}"})
-        else:
-            messages.append({"role": "user", "content": user_text})
-        completion = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=messages,
-            max_tokens=MAX_TOKENS,
-            temperature=TEMPERATURE,
-        )
-        usage = getattr(completion, "usage", None)
-        if usage:
-            BOT_STATS["prompt_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
-            BOT_STATS["completion_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
-            total_used = int(getattr(usage, "total_tokens", 0) or 0)
-            BOT_STATS["total_tokens"] += total_used
-            if user_id is not None and not ignore_user_limit:
-                add_user_daily_tokens(user_id, total_used)
-        answer = completion.choices[0].message.content.strip() or "openmodel вернул пустой ответ, смотри /panel"
-        BOT_STATS["last_ai_answer"] = short_debug(answer)
-        log.warning(f"AI EXTRACTED ANSWER: {answer!r}")
-        if chat_id is not None and user_id is not None:
-            history = get_user_history(chat_id, user_id)
-            history.append({"role": "user", "content": user_text})
-            history.append({"role": "assistant", "content": answer})
-            save_user_history(chat_id, user_id, history)
-        return answer
-    except Exception as e:
-        BOT_STATS["errors"] += 1
-        BOT_STATS["last_ai_error"] = short_debug(repr(e), 900)
-        log.exception(f"OpenModel error: {e}")
-        return f"openmodel упал: {type(e).__name__}. смотри /panel"
+    def clean_chat_title(title: str) -> str:
+    title = (title or "").strip().strip('"').strip("«»").lower()
+    title = title.replace("\n", " ").replace("\r", " ")
+    title = " ".join(title.split())
 
-def random_coordinates() -> tuple[float, float]:
-    return random.uniform(-85.0, 85.0), random.uniform(-180.0, 180.0)
+    bad_markers = [
+        "openmodel вернул",
+        "смотри /panel",
+        "смотри /p",
+        "я чёта сломалась",
+        "empty text",
+        "thinkingblock",
+    ]
+
+    if not title or any(marker in title for marker in bad_markers):
+        return None
+
+    return title[:40] if title[:40] else None
+
 
 def generate_silly_name() -> str:
     try:
@@ -502,22 +472,27 @@ def generate_silly_name() -> str:
                         "до 40 символов. "
                         "ответь только названием. "
                         "без кавычек. "
-                        "без пояснений."
+                        "без пояснений. "
+                        "никаких мыслей, рассуждений и скобок — только готовое название."
                     ),
                 },
-                {"role": "user", "content": "придумай название"},
+                {"role": "user", "content": "название"},
             ],
-            max_tokens=35,
+            max_tokens=500,
             temperature=1.35,
         )
 
-        title = completion.choices[0].message.content.strip().strip('"').strip("«»").lower()
-        return title[:40]
+        raw_title = completion.choices[0].message.content.strip()
+        log.warning(f"RAW CHAT TITLE ANSWER: {raw_title!r}")
+
+        title = clean_chat_title(raw_title)
+        log.warning(f"CLEAN CHAT TITLE: {title!r}")
+        return title
 
     except Exception as e:
         BOT_STATS["errors"] += 1
         log.exception(f"OpenModel name error: {e}")
-        return "министерство ебаных кабачков"
+        return None
 
 
 def generate_poll() -> tuple[str, list[str]]:
@@ -851,7 +826,9 @@ async def chaos_job(context: ContextTypes.DEFAULT_TYPE):
             if not can_rename_chat(chat_id):
                 return
 
-            title = generate_silly_name()
+            title = clean_chat_title(generate_silly_name())
+            if not title:
+                return
 
             try:
                 await context.bot.set_chat_title(chat_id, title[:128])
