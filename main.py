@@ -159,7 +159,54 @@ class _OpenModelCompletions:
         if not text:
             BOT_STATS["last_ai_error"] = "openmodel returned empty text"
             log.warning(f"OPENMODEL EMPTY TEXT RESPONSE: {response}")
-            text = "openmodel вернул пустой ответ, смотри /panel"
+
+            # второй шанс: если openmodel дал только thinkingblock без textblock.
+            try:
+                retry_response = openmodel_client.messages.create(
+                    model=model,
+                    max_tokens=180,
+                    temperature=temperature,
+                    system=(
+                        "ответь только финальным текстом. "
+                        "не рассуждай. не пиши мысли. "
+                        "1-2 коротких предложения, нижний регистр."
+                    ),
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": "дай короткий финальный ответ в стиле бота, без мыслей и пояснений",
+                        }
+                    ],
+                )
+
+                BOT_STATS["last_ai_raw"] = short_debug(retry_response)
+                log.warning(f"RAW OPENMODEL RETRY RESPONSE: {retry_response}")
+
+                retry_parts = []
+                retry_content = getattr(retry_response, "content", None)
+
+                if isinstance(retry_content, str):
+                    retry_parts.append(retry_content)
+                elif retry_content:
+                    for retry_block in retry_content:
+                        retry_text = getattr(retry_block, "text", None)
+                        retry_type = getattr(retry_block, "type", None)
+
+                        if retry_type == "text" and retry_text:
+                            retry_parts.append(str(retry_text))
+                        elif retry_text:
+                            retry_parts.append(str(retry_text))
+                        elif isinstance(retry_block, dict) and retry_block.get("text"):
+                            retry_parts.append(str(retry_block["text"]))
+
+                text = "".join(retry_parts).strip()
+
+            except Exception as retry_error:
+                BOT_STATS["last_ai_error"] = short_debug(repr(retry_error), 900)
+                log.exception(f"OpenModel retry error: {retry_error}")
+
+            if not text:
+                text = "мозг зажевало, повтори ещё раз, кабачок"
 
         usage = getattr(response, "usage", None)
         compat_usage = _CompatUsage(
@@ -501,6 +548,7 @@ def clean_chat_title(title: str | None) -> str | None:
         "empty text",
         "thinkingblock",
         "openmodel упал",
+        "мозг зажевало",
     ]
 
     if not title:
