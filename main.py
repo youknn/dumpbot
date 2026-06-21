@@ -127,12 +127,37 @@ class _OpenModelCompletions:
             messages=chat_messages,
         )
 
+        log.warning(f"RAW OPENMODEL RESPONSE: {response}")
+
         text_parts = []
-        for block in response.content:
-            if getattr(block, "type", None) == "text":
-                text_parts.append(block.text)
+        content = getattr(response, "content", None)
+
+        if isinstance(content, str):
+            text_parts.append(content)
+        elif content:
+            for block in content:
+                if isinstance(block, str):
+                    text_parts.append(block)
+                    continue
+
+                block_type = getattr(block, "type", None)
+                block_text = getattr(block, "text", None)
+
+                if block_type == "text" and block_text:
+                    text_parts.append(str(block_text))
+                elif block_text:
+                    text_parts.append(str(block_text))
+                elif isinstance(block, dict):
+                    if block.get("text"):
+                        text_parts.append(str(block["text"]))
+                    elif block.get("content"):
+                        text_parts.append(str(block["content"]))
 
         text = "".join(text_parts).strip()
+
+        if not text:
+            log.warning(f"OPENMODEL EMPTY TEXT RESPONSE: {response}")
+            text = "я чёта сломалась, пиздец"
 
         usage = getattr(response, "usage", None)
         compat_usage = _CompatUsage(
@@ -434,6 +459,7 @@ def ask_ai(user_text: str, chat_id: int | None = None, user_id: int | None = Non
             if user_id is not None and not ignore_user_limit:
                 add_user_daily_tokens(user_id, total_used)
         answer = completion.choices[0].message.content.strip() or "я чёта сломалась, пиздец"
+        log.warning(f"AI EXTRACTED ANSWER: {answer!r}")
         if chat_id is not None and user_id is not None:
             history = get_user_history(chat_id, user_id)
             history.append({"role": "user", "content": user_text})
