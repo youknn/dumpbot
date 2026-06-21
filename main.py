@@ -54,7 +54,7 @@ PORT = int(os.environ.get("PORT", "10000"))
 OWNER_ID = int(os.environ.get("OWNER_ID", "0") or "0")
 
 GROQ_MODEL = os.environ.get("OPENMODEL_MODEL", os.environ.get("GROQ_MODEL", "deepseek-v4-flash"))
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "100"))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "300"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "1.0"))
 
 RANDOM_REPLY_CHANCE = float(os.environ.get("RANDOM_REPLY_CHANCE", "0.10"))
