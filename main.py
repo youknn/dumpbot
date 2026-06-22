@@ -75,7 +75,7 @@ if not OPENMODEL_API_KEY:
 
 openmodel_client = anthropic.Anthropic(
     api_key=OPENMODEL_API_KEY,
-    base_url=OPENMODEL_BASE_URL if OPENMODEL_BASE_URL.endswith("/v1") else OPENMODEL_BASE_URL + "/v1",
+    base_url=OPENMODEL_BASE_URL.rstrip("/"),
 )
 
 
