@@ -39,7 +39,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-import anthropic
+import openai
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,9 +73,9 @@ if not BOT_TOKEN:
 if not OPENMODEL_API_KEY:
     raise RuntimeError("Не задан OPENMODEL_API_KEY в Environment Variables")
 
-openmodel_client = anthropic.Anthropic(
+openmodel_client = openai.OpenAI(
     api_key=OPENMODEL_API_KEY,
-    base_url=OPENMODEL_BASE_URL,
+    base_url=OPENMODEL_BASE_URL + "/v1",
 )
 
 
@@ -104,115 +104,27 @@ class _CompatCompletion:
 
 class _OpenModelCompletions:
     def create(self, model: str, messages: list[dict], max_tokens: int, temperature: float = 1.0, **kwargs):
-        system_parts = []
-        chat_messages = []
-
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = str(msg.get("content", ""))
-
-            if role == "system":
-                system_parts.append(content)
-            elif role in ("user", "assistant"):
-                chat_messages.append({"role": role, "content": content})
-
-        if not chat_messages:
-            chat_messages = [{"role": "user", "content": "скажи что-нибудь"}]
-
-        response = openmodel_client.messages.create(
+        response = openmodel_client.chat.completions.create(
             model=model,
+            messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
-            system="\n\n".join(system_parts) if system_parts else None,
-            messages=chat_messages,
-            thinking={"type": "disabled"},  # отключаем thinking mode DeepSeek
         )
 
         BOT_STATS["last_ai_raw"] = short_debug(response)
         log.warning(f"RAW OPENMODEL RESPONSE: {response}")
 
-        text_parts = []
-        content = getattr(response, "content", None)
-
-        if isinstance(content, str):
-            text_parts.append(content)
-        elif content:
-            for block in content:
-                if isinstance(block, str):
-                    text_parts.append(block)
-                    continue
-
-                block_type = getattr(block, "type", None)
-                block_text = getattr(block, "text", None)
-
-                if block_type == "text" and block_text:
-                    text_parts.append(str(block_text))
-                elif block_text:
-                    text_parts.append(str(block_text))
-                elif isinstance(block, dict):
-                    if block.get("text"):
-                        text_parts.append(str(block["text"]))
-                    elif block.get("content"):
-                        text_parts.append(str(block["content"]))
-
-        text = "".join(text_parts).strip()
+        text = (response.choices[0].message.content or "").strip()
 
         if not text:
             BOT_STATS["last_ai_error"] = "openmodel returned empty text"
             log.warning(f"OPENMODEL EMPTY TEXT RESPONSE: {response}")
-
-            # второй шанс: если openmodel дал только thinkingblock без textblock.
-            try:
-                retry_response = openmodel_client.messages.create(
-                    model=model,
-                    max_tokens=180,
-                    temperature=temperature,
-                    system=(
-                        "ответь только финальным текстом. "
-                        "не рассуждай. не пиши мысли. "
-                        "1-2 коротких предложения, нижний регистр."
-                    ),
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": "дай короткий финальный ответ в стиле бота, без мыслей и пояснений",
-                        }
-                    ],
-                )
-
-                BOT_STATS["last_ai_raw"] = short_debug(retry_response)
-                log.warning(f"RAW OPENMODEL RETRY RESPONSE: {retry_response}")
-
-                retry_parts = []
-                retry_content = getattr(retry_response, "content", None)
-
-                if isinstance(retry_content, str):
-                    retry_parts.append(retry_content)
-                elif retry_content:
-                    for retry_block in retry_content:
-                        retry_text = getattr(retry_block, "text", None)
-                        retry_type = getattr(retry_block, "type", None)
-
-                        if retry_type == "text" and retry_text:
-                            retry_parts.append(str(retry_text))
-                        elif retry_text:
-                            retry_parts.append(str(retry_text))
-                        elif isinstance(retry_block, dict) and retry_block.get("text"):
-                            retry_parts.append(str(retry_block["text"]))
-
-                text = "".join(retry_parts).strip()
-
-            except Exception as retry_error:
-                BOT_STATS["last_ai_error"] = short_debug(repr(retry_error), 900)
-                log.exception(f"OpenModel retry error: {retry_error}")
-
-            if not text:
-                text = "мозг зажевало, повтори ещё раз, кабачок"
+            text = "мозг зажевало, повтори ещё раз, кабачок"
 
         usage = getattr(response, "usage", None)
         compat_usage = _CompatUsage(
-            prompt_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
-            completion_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+            prompt_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
+            completion_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
         )
         return _CompatCompletion(text, compat_usage)
 
