@@ -39,7 +39,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-import openai
+import anthropic
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,9 +73,9 @@ if not BOT_TOKEN:
 if not OPENMODEL_API_KEY:
     raise RuntimeError("Не задан OPENMODEL_API_KEY в Environment Variables")
 
-openmodel_client = openai.OpenAI(
+openmodel_client = anthropic.Anthropic(
     api_key=OPENMODEL_API_KEY,
-    base_url=OPENMODEL_BASE_URL + "/v1",
+    base_url=OPENMODEL_BASE_URL if OPENMODEL_BASE_URL.endswith("/v1") else OPENMODEL_BASE_URL + "/v1",
 )
 
 
@@ -104,17 +104,46 @@ class _CompatCompletion:
 
 class _OpenModelCompletions:
     def create(self, model: str, messages: list[dict], max_tokens: int, temperature: float = 1.0, **kwargs):
-        response = openmodel_client.chat.completions.create(
+        system_parts = []
+        chat_messages = []
+
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = str(msg.get("content", ""))
+            if role == "system":
+                system_parts.append(content)
+            elif role in ("user", "assistant"):
+                chat_messages.append({"role": role, "content": content})
+
+        if not chat_messages:
+            chat_messages = [{"role": "user", "content": "скажи что-нибудь"}]
+
+        response = openmodel_client.messages.create(
             model=model,
-            messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
+            system="\n\n".join(system_parts) if system_parts else None,
+            messages=chat_messages,
         )
 
         BOT_STATS["last_ai_raw"] = short_debug(response)
         log.warning(f"RAW OPENMODEL RESPONSE: {response}")
 
-        text = (response.choices[0].message.content or "").strip()
+        # Собираем только text-блоки, thinking-блоки пропускаем
+        text_parts = []
+        content = getattr(response, "content", None)
+        if isinstance(content, str):
+            text_parts.append(content)
+        elif content:
+            for block in content:
+                block_type = getattr(block, "type", None)
+                block_text = getattr(block, "text", None)
+                if block_type == "text" and block_text:
+                    text_parts.append(str(block_text))
+                elif isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+                    text_parts.append(str(block["text"]))
+
+        text = "".join(text_parts).strip()
 
         if not text:
             BOT_STATS["last_ai_error"] = "openmodel returned empty text"
@@ -123,8 +152,8 @@ class _OpenModelCompletions:
 
         usage = getattr(response, "usage", None)
         compat_usage = _CompatUsage(
-            prompt_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
-            completion_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
+            prompt_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
+            completion_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
         )
         return _CompatCompletion(text, compat_usage)
 
