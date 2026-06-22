@@ -125,6 +125,7 @@ class _OpenModelCompletions:
             temperature=temperature,
             system="\n\n".join(system_parts) if system_parts else None,
             messages=chat_messages,
+            thinking={"type": "disabled"},  # отключаем thinking mode DeepSeek
         )
 
         BOT_STATS["last_ai_raw"] = short_debug(response)
@@ -570,7 +571,7 @@ def random_coordinates() -> tuple[float, float]:
     return random.uniform(-85.0, 85.0), random.uniform(-180.0, 180.0)
 
 def clean_chat_title(title: str | None) -> str | None:
-    title = (title or "").strip().strip('"').strip("«»").lower()
+    title = (title or "").strip().strip('"').strip("«»").strip("'")
     title = title.replace("\n", " ").replace("\r", " ")
     title = " ".join(title.split())
 
@@ -588,10 +589,23 @@ def clean_chat_title(title: str | None) -> str | None:
     if not title:
         return None
 
-    if any(marker in title for marker in bad_markers):
+    if any(marker in title.lower() for marker in bad_markers):
         return None
 
-    return title[:40] if title[:40] else None
+    # Фильтр мусорных "подтверждений" — модель иногда отвечает "готово." вместо названия
+    junk_exact = {
+        "готово", "готово.", "сделано", "сделано.", "ок", "ок.", "окей", "окей.",
+        "хорошо", "хорошо.", "принято", "принято.", "выполнено", "выполнено.",
+        "название", "название.", "done", "done.", "ok", "ok.", "okay",
+        "понял", "понял.", "есть", "есть.", "конечно", "конечно.",
+    }
+    if title.lower() in junk_exact:
+        return None
+
+    if len(title) < 3:
+        return None
+
+    return title[:40].strip() or None
 
 
 def generate_silly_name() -> str | None:
@@ -602,19 +616,22 @@ def generate_silly_name() -> str | None:
                 {
                     "role": "system",
                     "content": (
-                        "придумай максимально уебанское, дебильное, глупое и бомжатское название для чата. "
-                        "нужно использовать русский мат. "
-                        "название должно выглядеть как максимальное несуразное чудо, которое могла придумать только шлюпа. "
-                        "до 40 символов. "
-                        "ответь только названием. "
-                        "без кавычек. "
-                        "без пояснений. "
-                        "никаких мыслей, рассуждений и скобок — только готовое название."
+                        "ты генератор названий для телеграм-чатов. "
+                        "твоя задача — вернуть ТОЛЬКО название чата, ничего больше. "
+                        "название должно быть максимально дебильным, абсурдным, с русским матом. "
+                        "СТРОГИЕ ПРАВИЛА:\n"
+                        "- ответь ТОЛЬКО самим названием, одной строкой\n"
+                        "- без слов 'готово', 'сделано', 'принято', 'вот', 'пожалуйста'\n"
+                        "- без кавычек, без скобок, без пояснений\n"
+                        "- без знаков препинания в конце\n"
+                        "- максимум 35 символов\n"
+                        "- это должно звучать как название группы, например: 'пиздец и котики 🐱' или 'хуёвый чатик 3000'\n"
+                        "- НЕ пиши 'название:', НЕ пиши предложения, только само название"
                     ),
                 },
-                {"role": "user", "content": "название"},
+                {"role": "user", "content": "придумай название для тупого чата"},
             ],
-            max_tokens=500,
+            max_tokens=800,
             temperature=1.35,
         )
 
